@@ -5,7 +5,7 @@ import { normalizeVariant, VariantKey } from "@/lib/variants";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import { Users, Copy, CheckCheck, ArrowLeft } from "lucide-react";
 import { GamePlay } from "@/components/game/game-play";
@@ -54,6 +54,18 @@ export function CoupGameClient({ roomCode, variant }: CoupGameClientProps) {
         action: action || undefined,
         onKicked: () => router.push(`${basePath}/join`),
     });
+
+    // Auto-join for reconnecting players
+    // If we receive a gameState without having joined, it means we're reconnecting
+    useEffect(() => {
+        if (gameState && !hasJoined) {
+            // Check if our playerId is in the game
+            const isInGame = gameState.players.some(p => p.id === playerId);
+            if (isInGame) {
+                setHasJoined(true);
+            }
+        }
+    }, [gameState, hasJoined, playerId]);
 
     const handleCopyCode = () => {
         navigator.clipboard.writeText(roomCode.toUpperCase());

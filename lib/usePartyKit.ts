@@ -105,6 +105,8 @@ export function usePartyCoup(params: string | UsePartyCoupParams): UsePartyCoupR
                 switch (message.type) {
                     case "state":
                         setGameState(message.payload);
+                        // Clear any error when we receive valid game state
+                        setError(null);
                         break;
 
                     case "waiting":
