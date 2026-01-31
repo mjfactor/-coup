@@ -24,6 +24,15 @@ interface PlayerConnection {
   name: string;
 }
 
+interface DisconnectedPlayer {
+  playerId: string;
+  disconnectedAt: number;
+  timeoutId?: ReturnType<typeof setTimeout>;
+}
+
+// Grace period in milliseconds before eliminating a disconnected player
+const RECONNECTION_GRACE_PERIOD = 60000; // 60 seconds
+
 export default class CoupServer implements Party.Server {
   options: Party.ServerOptions = { hibernate: false };
   gameState: GameState | null = null;

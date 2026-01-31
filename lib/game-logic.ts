@@ -958,6 +958,7 @@ export function eliminatePlayer(state: GameState, playerId: string): GameState {
         newState.pendingAction = null;
         newState.pendingBlock = null;
         newState.pendingChallenge = null;
+        newState.pendingInfluenceLoss = null;
         endTurn(newState); // End the actor's turn
         return newState;
     }
