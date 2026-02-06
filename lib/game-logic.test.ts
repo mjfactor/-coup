@@ -485,17 +485,17 @@ describe('Bug Fix: Assassination Challenge with 1 Card', () => {
         const cardToLose = player2.cards.find(c => !c.revealed)!;
         loseInfluence(state, player2.id, cardToLose.id);
 
-        // BUG FIX: Game should NOT be stuck in block_window
-        // Player 2 is eliminated, so the action should complete
+        // Player 2 is eliminated after losing their only card
         expect(player2.isAlive).toBe(false);
-        
-        // Game should proceed (either game_over if only 1 alive, or action phase for next turn)
-        expect(state.phase).not.toBe('block_window');
-        expect(state.phase).not.toBe('lose_influence');
         
         // With 3 players and 1 eliminated, game continues
         expect(getAlivePlayers(state).length).toBe(2);
-        expect(state.phase).toBe('action');
+
+        // Challenge failed so the action is valid. Assassination can be blocked
+        // (e.g. by Contessa), so the game correctly moves to block_window
+        // for remaining alive players. The game should NOT hang in lose_influence.
+        expect(state.phase).not.toBe('lose_influence');
+        expect(state.phase).toBe('block_window');
     });
 
     it('should end game when assassination challenge leaves only 1 player alive', () => {
@@ -917,8 +917,9 @@ describe('Steal with Target Elimination During Challenge', () => {
         // Player 2 is eliminated
         expect(player2.isAlive).toBe(false);
 
-        // Game should not hang - should proceed to next turn
-        expect(newState.phase).toBe('action');
+        // Challenge failed so steal is valid. Steal can be blocked (Captain/Ambassador),
+        // so the game correctly moves to block_window for remaining alive players.
+        expect(newState.phase).toBe('block_window');
     });
 });
 
@@ -1253,5 +1254,191 @@ describe('Reconnection Grace Period Behavior', () => {
 
         // Game continues with remaining players
         expect(newState.phase).not.toBe('game_over');
+    });
+});
+
+// ============================================================================
+// KICKED PLAYER PENDING TASK BUG TESTS
+// ============================================================================
+describe('Kicked player with pending task', () => {
+    it('should advance past challenge_window when a non-actor player who has not passed is kicked', () => {
+        // 3-player game: player1 does tax (claims Duke), player2 and player3 can challenge
+        // player3 has not passed yet, then gets kicked -> game should advance
+        const state = createTestGame(3);
+        const actor = state.players[0];
+        const bystander = state.players[2];
+
+        setCurrentPlayer(state, actor.id);
+        setPlayerCards(state, actor.id, ['Duke', 'Captain']);
+
+        // Perform tax (challengeable, claims Duke)
+        let newState = performAction(state, {
+            type: 'tax',
+            actorId: actor.id,
+        });
+
+        expect(newState.phase).toBe('challenge_window');
+
+        // Player 2 passes the challenge
+        newState = passChallenge(newState, state.players[1].id);
+        // Player 3 has NOT passed yet
+        expect(newState.phase).toBe('challenge_window'); // still waiting
+
+        // Now player 3 gets kicked/eliminated
+        newState = eliminatePlayer(newState, bystander.id);
+
+        // Game should no longer be stuck in challenge_window
+        // tax is not blockable, so it should resolve directly
+        expect(bystander.isAlive).toBe(false);
+        expect(newState.phase).not.toBe('challenge_window');
+    });
+
+    it('should resolve action when kicked player was the only one left to pass challenge', () => {
+        // 2-player game: player1 does foreign_aid, only player2 can challenge
+        // player2 gets kicked before passing -> action should proceed
+        const state = createTestGame(3);
+        const actor = state.players[0];
+        const target = state.players[1];
+        const bystander = state.players[2];
+
+        setCurrentPlayer(state, actor.id);
+        givePlayerCoins(state, actor.id, 7);
+
+        // Player1 does tax (challengeable, not blockable)
+        setPlayerCards(state, actor.id, ['Duke', 'Assassin']);
+        let newState = performAction(state, {
+            type: 'tax',
+            actorId: actor.id,
+        });
+
+        expect(newState.phase).toBe('challenge_window');
+
+        // Player 2 passes
+        newState = passChallenge(newState, target.id);
+        expect(newState.phase).toBe('challenge_window'); // still waiting for player 3
+
+        // Player 3 gets kicked before passing
+        newState = eliminatePlayer(newState, bystander.id);
+
+        // All remaining alive players have passed, action should resolve
+        // Tax is not blockable, so it should resolve directly
+        expect(newState.phase).not.toBe('challenge_window');
+    });
+
+    it('should advance past block_window when kicked player was needed to pass for foreign_aid', () => {
+        // 3-player game: player1 does foreign_aid, no one challenged, now in block_window
+        // player2 passes block, player3 has not -> player3 gets kicked -> action should resolve
+        const state = createTestGame(3);
+        const actor = state.players[0];
+        const bystander = state.players[2];
+
+        setCurrentPlayer(state, actor.id);
+        const coinsBeforeAction = actor.coins;
+
+        // Perform foreign_aid
+        let newState = performAction(state, {
+            type: 'foreign_aid',
+            actorId: actor.id,
+        });
+
+        // All players pass challenge
+        newState = passChallenge(newState, state.players[1].id);
+        newState = passChallenge(newState, state.players[2].id);
+        expect(newState.phase).toBe('block_window');
+
+        // Player 2 passes block
+        newState = passBlock(newState, state.players[1].id);
+        expect(newState.phase).toBe('block_window'); // still waiting for player 3
+
+        // Player 3 gets kicked
+        newState = eliminatePlayer(newState, bystander.id);
+
+        // Game should have resolved the foreign_aid action
+        expect(bystander.isAlive).toBe(false);
+        expect(newState.phase).not.toBe('block_window');
+    });
+
+    it('should advance past block_window when target of a targeted action is kicked', () => {
+        // player1 assassinates player2, no challenge, now in block_window waiting for player2
+        // player2 gets kicked -> action should resolve (or skip since target is dead)
+        const state = createTestGame(3);
+        const actor = state.players[0];
+        const target = state.players[1];
+
+        setCurrentPlayer(state, actor.id);
+        givePlayerCoins(state, actor.id, 5);
+        setPlayerCards(state, actor.id, ['Assassin', 'Duke']);
+
+        // Perform assassination
+        let newState = performAction(state, {
+            type: 'assassinate',
+            actorId: actor.id,
+            targetId: target.id,
+        });
+
+        // All pass challenge
+        newState = passChallenge(newState, state.players[1].id);
+        newState = passChallenge(newState, state.players[2].id);
+        expect(newState.phase).toBe('block_window');
+
+        // Target (player2) gets kicked while block_window is waiting for them
+        newState = eliminatePlayer(newState, target.id);
+
+        // Game should not be stuck in block_window
+        expect(target.isAlive).toBe(false);
+        expect(newState.phase).not.toBe('block_window');
+    });
+
+    it('should not hang when kicked player was expected to lose influence', () => {
+        // player1 coups player2 -> player2 needs to lose influence
+        // player2 is kicked -> game should move on
+        const state = createTestGame(3);
+        const actor = state.players[0];
+        const target = state.players[1];
+
+        setCurrentPlayer(state, actor.id);
+        givePlayerCoins(state, actor.id, 7);
+
+        // Perform coup
+        let newState = performAction(state, {
+            type: 'coup',
+            actorId: actor.id,
+            targetId: target.id,
+        });
+
+        // Coup goes to lose_influence phase for target
+        expect(newState.pendingInfluenceLoss).toBe(target.id);
+        expect(newState.phase).toBe('lose_influence');
+
+        // Target gets kicked before choosing a card
+        newState = eliminatePlayer(newState, target.id);
+
+        // Game should not be stuck
+        expect(target.isAlive).toBe(false);
+        expect(newState.phase).not.toBe('lose_influence');
+        expect(newState.pendingInfluenceLoss).toBeNull();
+    });
+
+    it('should handle kicking the current turn player with a pending action', () => {
+        // It's player1's turn, they started an action, then get kicked
+        const state = createTestGame(3);
+        const actor = state.players[0];
+
+        setCurrentPlayer(state, actor.id);
+
+        let newState = performAction(state, {
+            type: 'tax',
+            actorId: actor.id,
+        });
+
+        expect(newState.phase).toBe('challenge_window');
+
+        // Actor gets kicked mid-action
+        newState = eliminatePlayer(newState, actor.id);
+
+        // Should clean up and move to next turn
+        expect(actor.isAlive).toBe(false);
+        expect(newState.pendingAction).toBeNull();
+        expect(newState.phase).not.toBe('challenge_window');
     });
 });

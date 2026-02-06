@@ -1,5 +1,6 @@
 import type * as Party from "partykit/server";
-import { ActionRequest, BlockRequest, ChallengeRequest, GameState, blockAction, challengeAction, decideInterrogate, eliminatePlayer, exchangeCards, initializeGame, loseInfluence, passBlock, passChallenge, performAction, selectInterrogateCard } from "../lib/game-logic";
+import type { ActionRequest, BlockRequest, ChallengeRequest, GameState } from "../lib/game-logic";
+import { blockAction, challengeAction, decideInterrogate, eliminatePlayer, exchangeCards, initializeGame, loseInfluence, passBlock, passChallenge, performAction, selectInterrogateCard } from "../lib/game-logic";
 import { isVariantKey, normalizeVariant } from "../lib/variants";
 
 type MessageType =
@@ -283,30 +284,64 @@ export default class CoupServer implements Party.Server {
             return;
           }
 
-          // Can't kick if game has started
-          if (this.gameState && this.gameState.phase !== "waiting") {
+          const targetPlayerId = msg.payload.playerId;
+
+          // Can't kick yourself
+          if (targetPlayerId === playerId) {
             sender.send(JSON.stringify({
               type: "error",
-              payload: { message: "Cannot kick players after game has started" },
+              payload: { message: "Cannot kick yourself" },
             }));
             return;
           }
 
-          // Remove player
-          const targetPlayerId = msg.payload.playerId;
-          this.players.delete(targetPlayerId);
-          await this.saveState();
+          // If game is in progress, eliminate the player instead of removing
+          if (this.gameState && this.gameState.phase !== "waiting" && this.gameState.phase !== "game_over") {
+            const targetPlayer = this.gameState.players.find(p => p.id === targetPlayerId);
+            if (targetPlayer && targetPlayer.isAlive) {
+              // Clear any pending reconnection timeout for this player
+              const disconnectedInfo = this.disconnectedPlayers.get(targetPlayerId);
+              if (disconnectedInfo?.timeoutId) {
+                clearTimeout(disconnectedInfo.timeoutId);
+                this.disconnectedPlayers.delete(targetPlayerId);
+              }
 
-          // Broadcast updated player list
-          this.party.broadcast(JSON.stringify({
-            type: "players-updated",
-            payload: {
-              players: Array.from(this.players.values()),
-              hostId: this.hostId
-            },
-          }));
+              // Eliminate the player
+              this.gameState = eliminatePlayer(this.gameState, targetPlayerId, 'was kicked');
+              await this.saveState();
 
-          // Send kick message to kicked player
+              // Broadcast updated game state
+              this.party.broadcast(JSON.stringify({
+                type: "state",
+                payload: this.gameState,
+              }));
+
+              // Notify about the kick
+              this.party.broadcast(JSON.stringify({
+                type: "player-kicked-from-game",
+                payload: { 
+                  playerId: targetPlayerId,
+                  playerName: targetPlayer.name,
+                  message: `${targetPlayer.name} was kicked from the game`
+                }
+              }));
+            }
+          } else {
+            // Game hasn't started - remove from lobby
+            this.players.delete(targetPlayerId);
+            await this.saveState();
+
+            // Broadcast updated player list
+            this.party.broadcast(JSON.stringify({
+              type: "players-updated",
+              payload: {
+                players: Array.from(this.players.values()),
+                hostId: this.hostId
+              },
+            }));
+          }
+
+          // Send kick message to kicked player and close their connection
           for (const conn of this.party.getConnections()) {
             const connPlayerId = this.connectionToPlayerId.get(conn.id);
             if (connPlayerId === targetPlayerId) {

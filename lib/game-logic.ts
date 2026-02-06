@@ -914,7 +914,7 @@ export function decideInterrogate(
     return newState;
 }
 
-export function eliminatePlayer(state: GameState, playerId: string): GameState {
+export function eliminatePlayer(state: GameState, playerId: string, reason: string = 'disconnected'): GameState {
     const newState = { ...state };
     const player = getPlayer(newState, playerId);
 
@@ -924,7 +924,7 @@ export function eliminatePlayer(state: GameState, playerId: string): GameState {
     player.cards.forEach(c => c.revealed = true);
     player.isAlive = false;
 
-    addLog(newState, `${player.name} disconnected and was eliminated`, playerId);
+    addLog(newState, `${player.name} ${reason} and was eliminated`, playerId);
 
     // Check for winner immediately
     const alivePlayers = getAlivePlayers(newState);
@@ -1030,6 +1030,76 @@ export function eliminatePlayer(state: GameState, playerId: string): GameState {
             endTurn(newState);
         }
         return newState;
+    }
+
+    // 7. If the eliminated player was expected to pass in a waiting phase,
+    // re-check whether all remaining alive players have now passed.
+    // Without this, the game hangs waiting for a dead player's response.
+    if (newState.phase === 'challenge_window') {
+        const currentAlivePlayers = getAlivePlayers(newState);
+        let subjectId: string | null = null;
+
+        if (newState.pendingBlock) {
+            subjectId = newState.pendingBlock.blockerId;
+        } else if (newState.pendingAction) {
+            subjectId = newState.pendingAction.actorId;
+        }
+
+        if (subjectId) {
+            const eligibleChallengers = currentAlivePlayers.filter(p => p.id !== subjectId);
+            const allPassed = eligibleChallengers.every(p => newState.passedPlayers.includes(p.id));
+
+            if (allPassed) {
+                newState.passedPlayers = [];
+                if (newState.pendingBlock) {
+                    // Block succeeds, action is cancelled
+                    const blocker = getPlayer(newState, newState.pendingBlock.blockerId);
+                    if (blocker) {
+                        addLog(newState, `${blocker.name}'s block succeeds`, newState.pendingBlock.blockerId);
+                    }
+                    newState.pendingBlock = null;
+                    newState.pendingAction = null;
+                    endTurn(newState);
+                } else {
+                    // Action unchallenged - check if it can be blocked
+                    const action = newState.pendingAction!;
+                    const requirements = getVariantConfig(newState.variant).actionRequirements[action.type];
+
+                    if (requirements.canBeBlocked) {
+                        newState.phase = 'block_window';
+                    } else {
+                        resolveAction(newState);
+                    }
+                }
+            }
+        }
+    } else if (newState.phase === 'block_window' && newState.pendingAction) {
+        const currentAlivePlayers = getAlivePlayers(newState);
+        const actionType = newState.pendingAction.type;
+        let allPassed = false;
+
+        if (actionType === 'foreign_aid') {
+            const eligibleBlockers = currentAlivePlayers.filter(p => p.id !== newState.pendingAction!.actorId);
+            allPassed = eligibleBlockers.every(p => newState.passedPlayers.includes(p.id));
+        } else {
+            // Targeted actions - only target must pass
+            const targetId = newState.pendingAction.targetId;
+            if (targetId) {
+                const target = getPlayer(newState, targetId);
+                if (target && !target.isAlive) {
+                    // Target is dead, action target is gone
+                    allPassed = true;
+                } else if (targetId && newState.passedPlayers.includes(targetId)) {
+                    allPassed = true;
+                }
+            }
+        }
+
+        if (allPassed) {
+            newState.phase = 'resolving';
+            newState.passedPlayers = [];
+            resolveAction(newState);
+        }
     }
 
     return newState;
