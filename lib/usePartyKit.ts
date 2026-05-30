@@ -10,19 +10,50 @@ interface PlayerConnection {
     name: string;
 }
 
+export interface PlayerStat {
+    playerId: string;
+    playerName: string;
+    wins: number;
+    gamesPlayed: number;
+}
+
+export interface RoomStats {
+    totalGamesPlayed: number;
+    playerStats: Record<string, PlayerStat>;
+}
+
+export interface PlayerReaction {
+    id: string;
+    playerId: string;
+    playerName: string;
+    emoji: string;
+}
+
 type ServerMessage =
     | { type: "state"; payload: GameState }
     | { type: "waiting"; payload: { players: PlayerConnection[]; hostId: string | null } }
     | { type: "players-updated"; payload: { players: PlayerConnection[]; hostId: string | null } }
     | { type: "game-started"; payload: { gameState: GameState } }
+    | { type: "room-stats"; payload: RoomStats }
     | { type: "kicked"; payload: { message: string } }
-    | { type: "error"; payload: { message: string } };
+    | { type: "error"; payload: { message: string } }
+    | { type: "player-disconnected"; payload: { playerId: string; gracePeriodMs: number } }
+    | { type: "player-reconnected"; payload: { playerId: string } }
+    | { type: "player-eliminated-timeout"; payload: { playerId: string; playerName: string; message: string } }
+    | { type: "player-kicked-from-game"; payload: { playerId: string; playerName: string; message: string } }
+    | { type: "player-reaction"; payload: { playerId: string; playerName: string; emoji: string } };
 
 interface UsePartyCoupParams {
     roomCode: string;
     variant?: VariantKey | string;
     action?: string;
     onKicked?: () => void;
+}
+
+interface DisconnectedPlayerInfo {
+    playerId: string;
+    disconnectedAt: number;
+    gracePeriodMs: number;
 }
 
 interface UsePartyCoupReturn {
@@ -33,6 +64,9 @@ interface UsePartyCoupReturn {
     hostId: string | null;
     isHost: boolean;
     playerId: string;
+    roomStats: RoomStats | null;
+    disconnectedPlayers: Map<string, DisconnectedPlayerInfo>;
+    reactions: PlayerReaction[];
     joinGame: (playerName: string) => void;
     startGame: () => void;
     kickPlayer: (playerId: string) => void;
@@ -45,6 +79,7 @@ interface UsePartyCoupReturn {
     interrogateSelect: (cardId: string) => void;
     interrogateDecision: (decision: "keep" | "replace") => void;
     loseInfluence: (cardId: string) => void;
+    sendReaction: (emoji: string) => void;
     returnToLobby: () => void;
 }
 
@@ -61,12 +96,19 @@ export function usePartyCoup(params: string | UsePartyCoupParams): UsePartyCoupR
     const [isConnected, setIsConnected] = useState(false);
     const [error, setError] = useState<string | null>(null);
     const [hostId, setHostId] = useState<string | null>(null);
+    const [roomStats, setRoomStats] = useState<RoomStats | null>(null);
+    const [disconnectedPlayers, setDisconnectedPlayers] = useState<Map<string, DisconnectedPlayerInfo>>(new Map());
+    const [reactions, setReactions] = useState<PlayerReaction[]>([]);
     const socketRef = useRef<PartySocket | null>(null);
+    const reactionTimeoutsRef = useRef<ReturnType<typeof setTimeout>[]>([]);
     const [playerId] = useState<string>(() => {
         if (typeof window === 'undefined') return "";
+        const existingId = localStorage.getItem("coup_player_id");
+        if (existingId) {
+            return existingId;
+        }
         const id = crypto.randomUUID();
-        sessionStorage.setItem("coup_player_id", id);
-        sessionStorage.setItem("coup_tab_id", crypto.randomUUID());
+        localStorage.setItem("coup_player_id", id);
         return id;
     });
 
@@ -105,6 +147,8 @@ export function usePartyCoup(params: string | UsePartyCoupParams): UsePartyCoupR
                 switch (message.type) {
                     case "state":
                         setGameState(message.payload);
+                        // Clear any error when we receive valid game state
+                        setError(null);
                         break;
 
                     case "waiting":
@@ -128,9 +172,69 @@ export function usePartyCoup(params: string | UsePartyCoupParams): UsePartyCoupR
                         setPlayers([]);
                         break;
 
+                    case "room-stats":
+                        setRoomStats(message.payload);
+                        break;
+
                     case "error":
                         setError(message.payload.message);
                         break;
+
+                    case "player-disconnected":
+                        setDisconnectedPlayers(prev => {
+                            const newMap = new Map(prev);
+                            newMap.set(message.payload.playerId, {
+                                playerId: message.payload.playerId,
+                                disconnectedAt: Date.now(),
+                                gracePeriodMs: message.payload.gracePeriodMs
+                            });
+                            return newMap;
+                        });
+                        break;
+
+                    case "player-reconnected":
+                        setDisconnectedPlayers(prev => {
+                            const newMap = new Map(prev);
+                            newMap.delete(message.payload.playerId);
+                            return newMap;
+                        });
+                        break;
+
+                    case "player-eliminated-timeout":
+                        // Player was eliminated due to timeout - remove from disconnected list
+                        setDisconnectedPlayers(prev => {
+                            const newMap = new Map(prev);
+                            newMap.delete(message.payload.playerId);
+                            return newMap;
+                        });
+                        // Game state update will come separately via "state" message
+                        break;
+
+                    case "player-kicked-from-game":
+                        // Player was kicked during game - remove from disconnected list
+                        setDisconnectedPlayers(prev => {
+                            const newMap = new Map(prev);
+                            newMap.delete(message.payload.playerId);
+                            return newMap;
+                        });
+                        // Game state update will come separately via "state" message
+                        break;
+
+                    case "player-reaction": {
+                        const reactionId = crypto.randomUUID();
+                        const reaction: PlayerReaction = {
+                            id: reactionId,
+                            playerId: message.payload.playerId,
+                            playerName: message.payload.playerName,
+                            emoji: message.payload.emoji,
+                        };
+                        setReactions(prev => [...prev, reaction]);
+                        const timeoutId = setTimeout(() => {
+                            setReactions(prev => prev.filter(item => item.id !== reactionId));
+                        }, 2000);
+                        reactionTimeoutsRef.current.push(timeoutId);
+                        break;
+                    }
                 }
             } catch (err) {
                 console.error("Error parsing message:", err);
@@ -150,6 +254,8 @@ export function usePartyCoup(params: string | UsePartyCoupParams): UsePartyCoupR
 
         // Cleanup on unmount
         return () => {
+            reactionTimeoutsRef.current.forEach(clearTimeout);
+            reactionTimeoutsRef.current = [];
             socket.close();
             socketRef.current = null;
         };
@@ -209,6 +315,10 @@ export function usePartyCoup(params: string | UsePartyCoupParams): UsePartyCoupR
         sendMessage({ type: "lose-influence", payload: { cardId } });
     }, [sendMessage]);
 
+    const sendReaction = useCallback((emoji: string) => {
+        sendMessage({ type: "reaction", payload: { emoji } });
+    }, [sendMessage]);
+
     const returnToLobby = useCallback(() => {
         sendMessage({ type: "return-to-lobby" });
     }, [sendMessage]);
@@ -221,6 +331,9 @@ export function usePartyCoup(params: string | UsePartyCoupParams): UsePartyCoupR
         hostId,
         isHost: hostId === playerId,
         playerId,
+        roomStats,
+        disconnectedPlayers,
+        reactions,
         joinGame,
         startGame,
         kickPlayer,
@@ -233,6 +346,7 @@ export function usePartyCoup(params: string | UsePartyCoupParams): UsePartyCoupR
         interrogateSelect,
         interrogateDecision,
         loseInfluence,
+        sendReaction,
         returnToLobby,
     };
 }
