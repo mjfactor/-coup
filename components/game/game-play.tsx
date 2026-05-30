@@ -1,17 +1,29 @@
 "use client";
 
-import { useCallback } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { GameBoard } from "./game-board";
 import { BlockChallengePanel } from "./block-challenge-panel";
 import { CardSelector } from "./card-selector";
 import { GameState, ActionType, CharacterType, ActionRequest, BlockRequest, ChallengeRequest, Card } from "@/lib/game-logic";
+import type { PlayerReaction, RoomStats } from "@/lib/usePartyKit";
 import { useGameSounds } from "@/hooks/use-game-sounds";
 import Image from "next/image";
 import { CHARACTER_IMAGES } from "@/lib/variants";
 
+interface DisconnectedPlayerInfo {
+    playerId: string;
+    disconnectedAt: number;
+    gracePeriodMs: number;
+}
+
 interface GamePlayProps {
     gameState: GameState;
     myPlayerId: string;
+    isHost: boolean;
+    roomStats: RoomStats | null;
+    disconnectedPlayers: Map<string, DisconnectedPlayerInfo>;
+    reactions: PlayerReaction[];
+    onReaction: (emoji: string) => void;
     onAction: (action: ActionRequest) => void;
     onBlock: (block: BlockRequest) => void;
     onPassBlock: () => void;
@@ -22,6 +34,7 @@ interface GamePlayProps {
     onInterrogateDecision: (decision: "keep" | "replace") => void;
     onLoseInfluence: (cardId: string) => void;
     onReturnToLobby: () => void;
+    onKickPlayer: (playerId: string) => void;
     error?: string | null;
 }
 
@@ -78,6 +91,9 @@ function InterrogateDecisionModal({
 export function GamePlay({
     gameState,
     myPlayerId,
+    isHost,
+    roomStats,
+    disconnectedPlayers,
     onAction,
     onBlock,
     onPassBlock,
@@ -88,10 +104,28 @@ export function GamePlay({
     onInterrogateDecision,
     onLoseInfluence,
     onReturnToLobby,
+    onKickPlayer,
+    reactions,
+    onReaction,
     error,
 }: GamePlayProps) {
+    const [soundMuted, setSoundMuted] = useState(false);
+
+    useEffect(() => {
+        const saved = localStorage.getItem("coup_sound_muted");
+        setSoundMuted(saved === "true");
+    }, []);
+
+    const handleToggleSound = useCallback(() => {
+        setSoundMuted(prev => {
+            const next = !prev;
+            localStorage.setItem("coup_sound_muted", String(next));
+            return next;
+        });
+    }, []);
+
     // Initialize game sounds
-    useGameSounds(gameState, myPlayerId);
+    useGameSounds(gameState, myPlayerId, soundMuted);
 
     // Find my player ID from the player name
     const myPlayer = myPlayerId ? gameState.players.find(p => p.id === myPlayerId) : null;
@@ -187,8 +221,16 @@ export function GamePlay({
             <GameBoard
                 gameState={gameState}
                 myPlayerId={myPlayerId}
+                isHost={isHost}
+                roomStats={roomStats}
+                disconnectedPlayers={disconnectedPlayers}
+                soundMuted={soundMuted}
+                reactions={reactions}
                 onAction={handleAction}
                 onReturnToLobby={onReturnToLobby}
+                onKickPlayer={onKickPlayer}
+                onToggleSound={handleToggleSound}
+                onReaction={onReaction}
             />
 
             {/* Block/Challenge Panel - Overlay */}
