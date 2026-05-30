@@ -426,11 +426,15 @@ export function resolveAction(state: GameState): void {
 
         case 'coup':
             if (target) {
+                if (!target.isAlive) {
+                    addLog(state, `${actor.name}'s coup target is already eliminated`, actor.id, action.type, target.id);
+                    break;
+                }
                 addLog(state, `${actor.name} coups ${target.name}`, actor.id, action.type, target.id);
                 addLog(state, `${target.name} must lose influence`, target.id);
                 state.pendingInfluenceLoss = target.id;
                 state.phase = 'lose_influence';
-                return; // Wait for card selection
+                return;
             }
             break;
 
@@ -441,16 +445,24 @@ export function resolveAction(state: GameState): void {
 
         case 'assassinate':
             if (target) {
+                if (!target.isAlive) {
+                    addLog(state, `${actor.name}'s assassination target is already eliminated`, actor.id, action.type, target.id);
+                    break;
+                }
                 addLog(state, `${actor.name} assassinates ${target.name}`, actor.id, action.type, target.id);
                 addLog(state, `${target.name} must lose influence`, target.id);
                 state.pendingInfluenceLoss = target.id;
                 state.phase = 'lose_influence';
-                return; // Wait for card selection
+                return;
             }
             break;
 
         case 'steal':
             if (target) {
+                if (!target.isAlive) {
+                    addLog(state, `${actor.name}'s steal target is already eliminated`, actor.id, action.type, target.id);
+                    break;
+                }
                 const stolen = Math.min(2, target.coins);
                 target.coins -= stolen;
                 actor.coins += stolen;
@@ -483,10 +495,14 @@ export function resolveAction(state: GameState): void {
 
         case 'interrogate':
             if (target) {
+                if (!target.isAlive) {
+                    addLog(state, `${actor.name}'s interrogation target is already eliminated`, actor.id, action.type, target.id);
+                    break;
+                }
                 state.pendingInterrogate = { targetId: target.id };
                 state.phase = 'interrogate_select';
                 addLog(state, `${actor.name} interrogates ${target.name}`, actor.id, action.type, target.id);
-                return; // Wait for target selection and actor decision
+                return;
             }
             break;
     }
@@ -753,10 +769,18 @@ export function loseInfluence(state: GameState, playerId: string, cardId?: strin
                     const requirements = getVariantConfig(state.variant).actionRequirements[actionType];
 
                     if (requirements.canBeBlocked) {
-                        // Action is valid, but can still be blocked
-                        state.phase = 'block_window';
-                        state.passedPlayers = [];
-                        addLog(state, `Action confirmed, moving to block window`, state.pendingAction?.actorId);
+                        const actionTargetId = state.pendingAction!.targetId;
+                        const actionTarget = actionTargetId ? getPlayer(state, actionTargetId) : null;
+
+                        if (actionTarget && !actionTarget.isAlive) {
+                            addLog(state, `Target eliminated during challenge, action complete`, state.pendingAction?.actorId);
+                            state.pendingAction = null;
+                            endTurn(state);
+                        } else {
+                            state.phase = 'block_window';
+                            state.passedPlayers = [];
+                            addLog(state, `Action confirmed, moving to block window`, state.pendingAction?.actorId);
+                        }
                     } else {
                         resolveAction(state);
                     }

@@ -16,15 +16,18 @@ The game uses distinct sounds for major Coup actions and events:
 - `lose-influence.wav`
 - `game-over.wav`
 
-These WAV files are from Kenney UI Audio:
+These WAV files are from Mixkit's free sound effects library:
 
-- Source: https://www.kenney.nl/assets/ui-audio
-- Mirror used for download: https://github.com/Calinou/kenney-ui-audio
-- License: CC0 / public domain, no attribution required
+- Source: https://mixkit.co/free-sound-effects/
+- Game sounds: https://mixkit.co/free-sound-effects/game/
+- Game show sounds: https://mixkit.co/free-sound-effects/game-show/
+- License: Mixkit Sound Effects License, free for personal and commercial use, no attribution required
+
+Some longer files are trimmed to short one-shots so gameplay sounds do not overlap heavily.
+
+Kenney UI Audio was also reviewed as a CC0 source:
+
+- https://www.kenney.nl/assets/ui-audio
+- https://github.com/Calinou/kenney-ui-audio
 
 The older MP3 files (`play.mp3`, `block.mp3`, `i_challenge_you.mp3`) are kept for compatibility, but the current sound hook uses the WAV action sounds above.
-
-Mixkit was also reviewed as a free sound source:
-
-- https://mixkit.co/free-sound-effects/
-- https://mixkit.co/free-sound-effects/game/

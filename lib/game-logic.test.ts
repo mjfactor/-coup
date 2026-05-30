@@ -491,11 +491,11 @@ describe('Bug Fix: Assassination Challenge with 1 Card', () => {
         // With 3 players and 1 eliminated, game continues
         expect(getAlivePlayers(state).length).toBe(2);
 
-        // Challenge failed so the action is valid. Assassination can be blocked
-        // (e.g. by Contessa), so the game correctly moves to block_window
-        // for remaining alive players. The game should NOT hang in lose_influence.
+        // The target is dead, so block_window would hang (nobody can respond).
+        // The game should skip block_window and move to the next turn.
         expect(state.phase).not.toBe('lose_influence');
-        expect(state.phase).toBe('block_window');
+        expect(state.phase).not.toBe('block_window');
+        expect(state.phase).toBe('action');
     });
 
     it('should end game when assassination challenge leaves only 1 player alive', () => {
@@ -917,9 +917,9 @@ describe('Steal with Target Elimination During Challenge', () => {
         // Player 2 is eliminated
         expect(player2.isAlive).toBe(false);
 
-        // Challenge failed so steal is valid. Steal can be blocked (Captain/Ambassador),
-        // so the game correctly moves to block_window for remaining alive players.
-        expect(newState.phase).toBe('block_window');
+        // The target is dead, so block_window would hang. Game should skip it.
+        expect(newState.phase).not.toBe('block_window');
+        expect(newState.phase).toBe('action');
     });
 });
 

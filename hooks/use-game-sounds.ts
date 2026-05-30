@@ -54,7 +54,6 @@ export function useGameSounds(gameState: GameState | null, myPlayerId: string, m
 
                 if (
                     log.message.includes('loses influence') ||
-                    log.message.includes('must lose influence') ||
                     log.message.includes('is eliminated')
                 ) {
                     playLoseInfluence();
