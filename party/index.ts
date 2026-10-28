@@ -1,5 +1,6 @@
 import type * as Party from "partykit/server";
-import { ActionRequest, BlockRequest, ChallengeRequest, GameState, blockAction, challengeAction, decideInterrogate, eliminatePlayer, exchangeCards, initializeGame, loseInfluence, passBlock, passChallenge, performAction, selectInterrogateCard } from "../lib/game-logic";
+import type { ActionRequest, BlockRequest, ChallengeRequest, GameState } from "../lib/game-logic";
+import { blockAction, challengeAction, decideInterrogate, eliminatePlayer, exchangeCards, initializeGame, loseInfluence, passBlock, passChallenge, performAction, selectInterrogateCard } from "../lib/game-logic";
 import { isVariantKey, normalizeVariant } from "../lib/variants";
 
 type MessageType =
@@ -16,6 +17,7 @@ type MessageType =
   | { type: "interrogate-select"; payload: { cardId: string } }
   | { type: "interrogate-decision"; payload: { decision: "keep" | "replace" } }
   | { type: "lose-influence"; payload: { cardId: string } }
+  | { type: "reaction"; payload: { emoji: string } }
   | { type: "get-state" }
   | { type: "ping" };
 
@@ -24,6 +26,28 @@ interface PlayerConnection {
   name: string;
 }
 
+interface DisconnectedPlayer {
+  playerId: string;
+  disconnectedAt: number;
+  timeoutId?: ReturnType<typeof setTimeout>;
+}
+
+export interface PlayerStat {
+  playerId: string;
+  playerName: string;
+  wins: number;
+  gamesPlayed: number;
+}
+
+export interface RoomStats {
+  totalGamesPlayed: number;
+  playerStats: Record<string, PlayerStat>;
+}
+
+// Grace period in milliseconds before eliminating a disconnected player
+const RECONNECTION_GRACE_PERIOD = 60000; // 60 seconds
+const ALLOWED_REACTIONS = new Set(["👍", "👏", "😂", "😮", "🤔", "💀", "🔥"]);
+
 export default class CoupServer implements Party.Server {
   options: Party.ServerOptions = { hibernate: false };
   gameState: GameState | null = null;
@@ -31,6 +55,8 @@ export default class CoupServer implements Party.Server {
   hostId: string | null = null;
   created: boolean = false;
   connectionToPlayerId: Map<string, string> = new Map();
+  roomStats: RoomStats = { totalGamesPlayed: 0, playerStats: {} };
+  disconnectedPlayers: Map<string, DisconnectedPlayer> = new Map();
 
   constructor(readonly party: Party.Party) { }
 
@@ -65,6 +91,11 @@ export default class CoupServer implements Party.Server {
     if (isCreated) {
       this.created = true;
     }
+
+    const savedStats = await this.party.storage.get<RoomStats>("roomStats");
+    if (savedStats) {
+      this.roomStats = savedStats;
+    }
   }
 
   async saveState() {
@@ -78,6 +109,7 @@ export default class CoupServer implements Party.Server {
     if (this.created) {
       await this.party.storage.put("created", true);
     }
+    await this.party.storage.put("roomStats", this.roomStats);
   }
 
   onConnect(conn: Party.Connection, ctx: Party.ConnectionContext) {
@@ -102,6 +134,19 @@ export default class CoupServer implements Party.Server {
       return;
     }
 
+    // If this player reconnects within the grace period, keep them in the game.
+    const disconnectedInfo = this.disconnectedPlayers.get(playerId);
+    if (disconnectedInfo) {
+      if (disconnectedInfo.timeoutId) {
+        clearTimeout(disconnectedInfo.timeoutId);
+      }
+      this.disconnectedPlayers.delete(playerId);
+      this.party.broadcast(JSON.stringify({
+        type: "player-reconnected",
+        payload: { playerId },
+      }));
+    }
+
     // If game has already started, check if player is reconnecting
     if (this.gameState) {
       const isReconnecting = this.gameState.players.some(p => p.id === playerId);
@@ -117,6 +162,12 @@ export default class CoupServer implements Party.Server {
 
       // Send current game state to reconnecting player
       conn.send(JSON.stringify({ type: "state", payload: this.gameState }));
+      if (this.roomStats.totalGamesPlayed > 0) {
+        conn.send(JSON.stringify({
+          type: "room-stats",
+          payload: this.roomStats,
+        }));
+      }
       return;
     }
 
@@ -129,6 +180,13 @@ export default class CoupServer implements Party.Server {
         hostId: this.hostId
       }
     }));
+
+    if (this.roomStats.totalGamesPlayed > 0) {
+      conn.send(JSON.stringify({
+        type: "room-stats",
+        payload: this.roomStats,
+      }));
+    }
   }
 
   async onMessage(message: string, sender: Party.Connection) {
@@ -203,6 +261,7 @@ export default class CoupServer implements Party.Server {
           const variantFromRoom = this.getVariantFromRoomId(this.party.id);
           const variant = this.gameState?.variant ?? normalizeVariant(variantFromRoom);
           this.gameState = initializeGame(playerList, variant);
+          this.gameOverRecorded = false;
 
           await this.saveState();
 
@@ -211,6 +270,8 @@ export default class CoupServer implements Party.Server {
             type: "game-started",
             payload: { gameState: this.gameState },
           }));
+
+          this.broadcastStats();
           break;
         }
 
@@ -261,6 +322,8 @@ export default class CoupServer implements Party.Server {
               hostId: this.hostId
             },
           }));
+
+          this.broadcastStats();
           break;
         }
 
@@ -274,30 +337,58 @@ export default class CoupServer implements Party.Server {
             return;
           }
 
-          // Can't kick if game has started
-          if (this.gameState && this.gameState.phase !== "waiting") {
+          const targetPlayerId = msg.payload.playerId;
+
+          // Can't kick yourself
+          if (targetPlayerId === playerId) {
             sender.send(JSON.stringify({
               type: "error",
-              payload: { message: "Cannot kick players after game has started" },
+              payload: { message: "Cannot kick yourself" },
             }));
             return;
           }
 
-          // Remove player
-          const targetPlayerId = msg.payload.playerId;
-          this.players.delete(targetPlayerId);
-          await this.saveState();
+          // If game is in progress, eliminate the player instead of removing
+          if (this.gameState && this.gameState.phase !== "waiting" && this.gameState.phase !== "game_over") {
+            const targetPlayer = this.gameState.players.find(p => p.id === targetPlayerId);
+            if (targetPlayer && targetPlayer.isAlive) {
+              // Clear any pending reconnection timeout for this player
+              const disconnectedInfo = this.disconnectedPlayers.get(targetPlayerId);
+              if (disconnectedInfo?.timeoutId) {
+                clearTimeout(disconnectedInfo.timeoutId);
+                this.disconnectedPlayers.delete(targetPlayerId);
+              }
 
-          // Broadcast updated player list
-          this.party.broadcast(JSON.stringify({
-            type: "players-updated",
-            payload: {
-              players: Array.from(this.players.values()),
-              hostId: this.hostId
-            },
-          }));
+              // Eliminate the player
+              this.gameState = eliminatePlayer(this.gameState, targetPlayerId, 'was kicked');
+              await this.broadcastGameState();
 
-          // Send kick message to kicked player
+              // Notify about the kick
+              this.party.broadcast(JSON.stringify({
+                type: "player-kicked-from-game",
+                payload: { 
+                  playerId: targetPlayerId,
+                  playerName: targetPlayer.name,
+                  message: `${targetPlayer.name} was kicked from the game`
+                }
+              }));
+            }
+          } else {
+            // Game hasn't started - remove from lobby
+            this.players.delete(targetPlayerId);
+            await this.saveState();
+
+            // Broadcast updated player list
+            this.party.broadcast(JSON.stringify({
+              type: "players-updated",
+              payload: {
+                players: Array.from(this.players.values()),
+                hostId: this.hostId
+              },
+            }));
+          }
+
+          // Send kick message to kicked player and close their connection
           for (const conn of this.party.getConnections()) {
             const connPlayerId = this.connectionToPlayerId.get(conn.id);
             if (connPlayerId === targetPlayerId) {
@@ -314,133 +405,86 @@ export default class CoupServer implements Party.Server {
 
         case "action": {
           if (!this.gameState) return;
-
           this.gameState = performAction(this.gameState, msg.payload);
-          await this.saveState();
-
-          this.party.broadcast(JSON.stringify({
-            type: "state",
-            payload: this.gameState,
-          }));
+          await this.broadcastGameState();
           break;
         }
 
         case "block": {
           if (!this.gameState) return;
-
           this.gameState = blockAction(this.gameState, msg.payload);
-          await this.saveState();
-
-          this.party.broadcast(JSON.stringify({
-            type: "state",
-            payload: this.gameState,
-          }));
+          await this.broadcastGameState();
           break;
         }
 
         case "pass-block": {
           if (!this.gameState) return;
-
-          // Use persistent playerId directly
           if (!playerId) return;
-
           this.gameState = passBlock(this.gameState, playerId);
-          await this.saveState();
-
-          this.party.broadcast(JSON.stringify({
-            type: "state",
-            payload: this.gameState,
-          }));
+          await this.broadcastGameState();
           break;
         }
 
         case "challenge": {
           if (!this.gameState) return;
-
           this.gameState = challengeAction(this.gameState, msg.payload);
-          await this.saveState();
-
-          this.party.broadcast(JSON.stringify({
-            type: "state",
-            payload: this.gameState,
-          }));
+          await this.broadcastGameState();
           break;
         }
 
         case "pass-challenge": {
           if (!this.gameState) return;
-
-          // Use persistent playerId directly
           if (!playerId) return;
-
           this.gameState = passChallenge(this.gameState, playerId);
-          await this.saveState();
-
-          this.party.broadcast(JSON.stringify({
-            type: "state",
-            payload: this.gameState,
-          }));
+          await this.broadcastGameState();
           break;
         }
 
         case "exchange": {
           if (!this.gameState) return;
-
-          // Use persistent playerId directly
           if (!playerId) return;
-
           this.gameState = exchangeCards(this.gameState, playerId, msg.payload.keptCardIds);
-          await this.saveState();
-
-          this.party.broadcast(JSON.stringify({
-            type: "state",
-            payload: this.gameState,
-          }));
+          await this.broadcastGameState();
           break;
         }
 
         case "interrogate-select": {
           if (!this.gameState) return;
-
           if (!playerId) return;
-
           this.gameState = selectInterrogateCard(this.gameState, playerId, msg.payload.cardId);
-          await this.saveState();
-
-          this.party.broadcast(JSON.stringify({
-            type: "state",
-            payload: this.gameState,
-          }));
+          await this.broadcastGameState();
           break;
         }
 
         case "interrogate-decision": {
           if (!this.gameState) return;
-
           if (!playerId) return;
-
           this.gameState = decideInterrogate(this.gameState, playerId, msg.payload.decision);
-          await this.saveState();
-
-          this.party.broadcast(JSON.stringify({
-            type: "state",
-            payload: this.gameState,
-          }));
+          await this.broadcastGameState();
           break;
         }
 
         case "lose-influence": {
           if (!this.gameState) return;
-
-          // Use persistent playerId directly
           if (!playerId) return;
-
           loseInfluence(this.gameState, playerId, msg.payload.cardId);
-          await this.saveState();
+          await this.broadcastGameState();
+          break;
+        }
+
+        case "reaction": {
+          if (!playerId || !ALLOWED_REACTIONS.has(msg.payload.emoji)) return;
+          const playerName = this.players.get(playerId)?.name
+            ?? this.gameState?.players.find(p => p.id === playerId)?.name
+            ?? "Player";
 
           this.party.broadcast(JSON.stringify({
-            type: "state",
-            payload: this.gameState,
+            type: "player-reaction",
+            payload: {
+              playerId,
+              playerName,
+              emoji: msg.payload.emoji,
+            },
           }));
           break;
         }
@@ -478,17 +522,32 @@ export default class CoupServer implements Party.Server {
       this.connectionToPlayerId.delete(conn.id);
     }
 
-    // If game is in progress, eliminate the player
+    // If game is in progress, wait for reconnection before eliminating the player.
     if (this.gameState && this.gameState.phase !== "waiting" && this.gameState.phase !== "game_over" && playerId) {
       // Check if player is actually in the game (might be a spectator or old connection)
       const player = this.gameState.players.find(p => p.id === playerId);
       if (player && player.isAlive) {
-        this.gameState = eliminatePlayer(this.gameState, playerId);
-        this.saveState();
-        this.party.broadcast(JSON.stringify({
-          type: "state",
-          payload: this.gameState,
-        }));
+        const hasOtherConnection = Array.from(this.connectionToPlayerId.values()).includes(playerId);
+
+        if (!hasOtherConnection) {
+          this.party.broadcast(JSON.stringify({
+            type: "player-disconnected",
+            payload: {
+              playerId,
+              gracePeriodMs: RECONNECTION_GRACE_PERIOD,
+            },
+          }));
+
+          const timeoutId = setTimeout(() => {
+            this.eliminateDisconnectedPlayer(playerId);
+          }, RECONNECTION_GRACE_PERIOD);
+
+          this.disconnectedPlayers.set(playerId, {
+            playerId,
+            disconnectedAt: Date.now(),
+            timeoutId,
+          });
+        }
       }
     }
 
@@ -514,15 +573,84 @@ export default class CoupServer implements Party.Server {
     }
   }
 
+  private eliminateDisconnectedPlayer(playerId: string) {
+    // Clean up from disconnected players map
+    this.disconnectedPlayers.delete(playerId);
+
+    if (!this.gameState || this.gameState.phase === "game_over") {
+      return;
+    }
+
+    const player = this.gameState.players.find(p => p.id === playerId);
+    if (!player || !player.isAlive) {
+      return;
+    }
+
+    console.log(`Grace period expired - eliminating player ${playerId}`);
+
+    this.gameState = eliminatePlayer(this.gameState, playerId);
+    this.broadcastGameState();
+
+    this.party.broadcast(JSON.stringify({
+      type: "player-eliminated-timeout",
+      payload: { 
+        playerId,
+        playerName: player.name,
+        message: `${player.name} was eliminated due to disconnection timeout`
+      }
+    }));
+  }
+
   onError(conn: Party.Connection, error: Error) {
     console.error(`Error for connection ${conn.id}:`, error);
   }
 
-  // Helper method to get player ID from connection ID
-  private getPlayerIdFromConnection(connId: string): string | null {
-    // This method is now redundant as we use connectionToPlayerId map
-    // But keeping it for safety if needed, though logic above uses map directly
-    return this.connectionToPlayerId.get(connId) || null;
+  private recordGameResult() {
+    if (!this.gameState || this.gameState.phase !== 'game_over') return;
+
+    this.roomStats.totalGamesPlayed++;
+
+    for (const player of this.gameState.players) {
+      if (!this.roomStats.playerStats[player.id]) {
+        this.roomStats.playerStats[player.id] = {
+          playerId: player.id,
+          playerName: player.name,
+          wins: 0,
+          gamesPlayed: 0,
+        };
+      }
+      const stat = this.roomStats.playerStats[player.id];
+      stat.playerName = player.name;
+      stat.gamesPlayed++;
+      if (player.id === this.gameState.winner) {
+        stat.wins++;
+      }
+    }
+
+    this.broadcastStats();
+  }
+
+  private broadcastStats() {
+    this.party.broadcast(JSON.stringify({
+      type: "room-stats",
+      payload: this.roomStats,
+    }));
+  }
+
+  private gameOverRecorded = false;
+
+  private async broadcastGameState() {
+    await this.saveState();
+    this.party.broadcast(JSON.stringify({
+      type: "state",
+      payload: this.gameState,
+    }));
+
+    if (this.gameState?.phase === 'game_over' && !this.gameOverRecorded) {
+      this.gameOverRecorded = true;
+      this.recordGameResult();
+      await this.saveState();
+    }
   }
 }
 

@@ -426,11 +426,15 @@ export function resolveAction(state: GameState): void {
 
         case 'coup':
             if (target) {
+                if (!target.isAlive) {
+                    addLog(state, `${actor.name}'s coup target is already eliminated`, actor.id, action.type, target.id);
+                    break;
+                }
                 addLog(state, `${actor.name} coups ${target.name}`, actor.id, action.type, target.id);
                 addLog(state, `${target.name} must lose influence`, target.id);
                 state.pendingInfluenceLoss = target.id;
                 state.phase = 'lose_influence';
-                return; // Wait for card selection
+                return;
             }
             break;
 
@@ -441,16 +445,24 @@ export function resolveAction(state: GameState): void {
 
         case 'assassinate':
             if (target) {
+                if (!target.isAlive) {
+                    addLog(state, `${actor.name}'s assassination target is already eliminated`, actor.id, action.type, target.id);
+                    break;
+                }
                 addLog(state, `${actor.name} assassinates ${target.name}`, actor.id, action.type, target.id);
                 addLog(state, `${target.name} must lose influence`, target.id);
                 state.pendingInfluenceLoss = target.id;
                 state.phase = 'lose_influence';
-                return; // Wait for card selection
+                return;
             }
             break;
 
         case 'steal':
             if (target) {
+                if (!target.isAlive) {
+                    addLog(state, `${actor.name}'s steal target is already eliminated`, actor.id, action.type, target.id);
+                    break;
+                }
                 const stolen = Math.min(2, target.coins);
                 target.coins -= stolen;
                 actor.coins += stolen;
@@ -483,10 +495,14 @@ export function resolveAction(state: GameState): void {
 
         case 'interrogate':
             if (target) {
+                if (!target.isAlive) {
+                    addLog(state, `${actor.name}'s interrogation target is already eliminated`, actor.id, action.type, target.id);
+                    break;
+                }
                 state.pendingInterrogate = { targetId: target.id };
                 state.phase = 'interrogate_select';
                 addLog(state, `${actor.name} interrogates ${target.name}`, actor.id, action.type, target.id);
-                return; // Wait for target selection and actor decision
+                return;
             }
             break;
     }
@@ -753,10 +769,18 @@ export function loseInfluence(state: GameState, playerId: string, cardId?: strin
                     const requirements = getVariantConfig(state.variant).actionRequirements[actionType];
 
                     if (requirements.canBeBlocked) {
-                        // Action is valid, but can still be blocked
-                        state.phase = 'block_window';
-                        state.passedPlayers = [];
-                        addLog(state, `Action confirmed, moving to block window`, state.pendingAction?.actorId);
+                        const actionTargetId = state.pendingAction!.targetId;
+                        const actionTarget = actionTargetId ? getPlayer(state, actionTargetId) : null;
+
+                        if (actionTarget && !actionTarget.isAlive) {
+                            addLog(state, `Target eliminated during challenge, action complete`, state.pendingAction?.actorId);
+                            state.pendingAction = null;
+                            endTurn(state);
+                        } else {
+                            state.phase = 'block_window';
+                            state.passedPlayers = [];
+                            addLog(state, `Action confirmed, moving to block window`, state.pendingAction?.actorId);
+                        }
                     } else {
                         resolveAction(state);
                     }
@@ -914,7 +938,7 @@ export function decideInterrogate(
     return newState;
 }
 
-export function eliminatePlayer(state: GameState, playerId: string): GameState {
+export function eliminatePlayer(state: GameState, playerId: string, reason: string = 'disconnected'): GameState {
     const newState = { ...state };
     const player = getPlayer(newState, playerId);
 
@@ -924,7 +948,7 @@ export function eliminatePlayer(state: GameState, playerId: string): GameState {
     player.cards.forEach(c => c.revealed = true);
     player.isAlive = false;
 
-    addLog(newState, `${player.name} disconnected and was eliminated`, playerId);
+    addLog(newState, `${player.name} ${reason} and was eliminated`, playerId);
 
     // Check for winner immediately
     const alivePlayers = getAlivePlayers(newState);
@@ -958,6 +982,7 @@ export function eliminatePlayer(state: GameState, playerId: string): GameState {
         newState.pendingAction = null;
         newState.pendingBlock = null;
         newState.pendingChallenge = null;
+        newState.pendingInfluenceLoss = null;
         endTurn(newState); // End the actor's turn
         return newState;
     }
@@ -1029,6 +1054,76 @@ export function eliminatePlayer(state: GameState, playerId: string): GameState {
             endTurn(newState);
         }
         return newState;
+    }
+
+    // 7. If the eliminated player was expected to pass in a waiting phase,
+    // re-check whether all remaining alive players have now passed.
+    // Without this, the game hangs waiting for a dead player's response.
+    if (newState.phase === 'challenge_window') {
+        const currentAlivePlayers = getAlivePlayers(newState);
+        let subjectId: string | null = null;
+
+        if (newState.pendingBlock) {
+            subjectId = newState.pendingBlock.blockerId;
+        } else if (newState.pendingAction) {
+            subjectId = newState.pendingAction.actorId;
+        }
+
+        if (subjectId) {
+            const eligibleChallengers = currentAlivePlayers.filter(p => p.id !== subjectId);
+            const allPassed = eligibleChallengers.every(p => newState.passedPlayers.includes(p.id));
+
+            if (allPassed) {
+                newState.passedPlayers = [];
+                if (newState.pendingBlock) {
+                    // Block succeeds, action is cancelled
+                    const blocker = getPlayer(newState, newState.pendingBlock.blockerId);
+                    if (blocker) {
+                        addLog(newState, `${blocker.name}'s block succeeds`, newState.pendingBlock.blockerId);
+                    }
+                    newState.pendingBlock = null;
+                    newState.pendingAction = null;
+                    endTurn(newState);
+                } else {
+                    // Action unchallenged - check if it can be blocked
+                    const action = newState.pendingAction!;
+                    const requirements = getVariantConfig(newState.variant).actionRequirements[action.type];
+
+                    if (requirements.canBeBlocked) {
+                        newState.phase = 'block_window';
+                    } else {
+                        resolveAction(newState);
+                    }
+                }
+            }
+        }
+    } else if (newState.phase === 'block_window' && newState.pendingAction) {
+        const currentAlivePlayers = getAlivePlayers(newState);
+        const actionType = newState.pendingAction.type;
+        let allPassed = false;
+
+        if (actionType === 'foreign_aid') {
+            const eligibleBlockers = currentAlivePlayers.filter(p => p.id !== newState.pendingAction!.actorId);
+            allPassed = eligibleBlockers.every(p => newState.passedPlayers.includes(p.id));
+        } else {
+            // Targeted actions - only target must pass
+            const targetId = newState.pendingAction.targetId;
+            if (targetId) {
+                const target = getPlayer(newState, targetId);
+                if (target && !target.isAlive) {
+                    // Target is dead, action target is gone
+                    allPassed = true;
+                } else if (targetId && newState.passedPlayers.includes(targetId)) {
+                    allPassed = true;
+                }
+            }
+        }
+
+        if (allPassed) {
+            newState.phase = 'resolving';
+            newState.passedPlayers = [];
+            resolveAction(newState);
+        }
     }
 
     return newState;

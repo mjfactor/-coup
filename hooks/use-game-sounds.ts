@@ -2,11 +2,20 @@ import useSound from 'use-sound';
 import { useEffect, useRef } from 'react';
 import { GameState } from '@/lib/game-logic';
 
-export function useGameSounds(gameState: GameState | null, myPlayerId: string) {
-    // Sounds
-    const [playPlay] = useSound('/sounds/play.mp3');
-    const [playBlock] = useSound('/sounds/block.mp3');
-    const [playChallenge] = useSound('/sounds/i_challenge_you.mp3');
+export function useGameSounds(gameState: GameState | null, myPlayerId: string, muted: boolean) {
+    const [playIncome] = useSound('/sounds/income.wav', { volume: 0.6 });
+    const [playForeignAid] = useSound('/sounds/foreign-aid.wav', { volume: 0.6 });
+    const [playTax] = useSound('/sounds/tax.wav', { volume: 0.6 });
+    const [playCoup] = useSound('/sounds/coup.wav', { volume: 0.7 });
+    const [playAssassinate] = useSound('/sounds/assassinate.wav', { volume: 0.7 });
+    const [playSteal] = useSound('/sounds/steal.wav', { volume: 0.6 });
+    const [playExchange] = useSound('/sounds/exchange.wav', { volume: 0.55 });
+    const [playInterrogate] = useSound('/sounds/interrogate.wav', { volume: 0.6 });
+    const [playInquire] = useSound('/sounds/inquire.wav', { volume: 0.55 });
+    const [playBlock] = useSound('/sounds/block-action.wav', { volume: 0.65 });
+    const [playChallenge] = useSound('/sounds/challenge-action.wav', { volume: 0.7 });
+    const [playLoseInfluence] = useSound('/sounds/lose-influence.wav', { volume: 0.7 });
+    const [playGameOver] = useSound('/sounds/game-over.wav', { volume: 0.75 });
 
     const lastLogTimestampRef = useRef<number>(0);
     const lastTurnRef = useRef<number>(0);
@@ -25,32 +34,79 @@ export function useGameSounds(gameState: GameState | null, myPlayerId: string) {
         if (newLogs.length > 0) {
             lastLogTimestampRef.current = newLogs[newLogs.length - 1].timestamp;
 
-            newLogs.forEach(log => {
-                // Handle Action Sounds
-                if (log.actionType) {
-                    const isInitiation = log.message.includes('claims') || log.message.includes('attempts');
+            if (muted) return;
 
-                    // Play generic sound for all actions (Income, Coup, or initiation of others)
-                    if (log.actionType === 'income' || log.actionType === 'coup' || isInitiation) {
-                        playPlay();
-                    }
+            newLogs.forEach(log => {
+                if (log.message.includes('wins!')) {
+                    playGameOver();
+                    return;
                 }
 
-                // Handle Other Game Events
-                if (log.message.includes(' to block')) {
-                    playBlock();
-                } else if (log.message.includes('challenges')) {
+                if (log.message.includes('challenges')) {
                     playChallenge();
-                } else if (log.message.includes('loses influence')) {
-                    playPlay();
+                    return;
+                }
+
+                if (log.message.includes(' to block') || log.message.includes('block succeeds')) {
+                    playBlock();
+                    return;
+                }
+
+                if (
+                    log.message.includes('loses influence') ||
+                    log.message.includes('is eliminated')
+                ) {
+                    playLoseInfluence();
+                    return;
+                }
+
+                switch (log.actionType) {
+                    case 'income':
+                        playIncome();
+                        break;
+                    case 'foreign_aid':
+                        playForeignAid();
+                        break;
+                    case 'tax':
+                        playTax();
+                        break;
+                    case 'coup':
+                        playCoup();
+                        break;
+                    case 'assassinate':
+                        playAssassinate();
+                        break;
+                    case 'steal':
+                        playSteal();
+                        break;
+                    case 'exchange':
+                        playExchange();
+                        break;
+                    case 'interrogate':
+                        playInterrogate();
+                        break;
+                    case 'inquire':
+                        playInquire();
+                        break;
                 }
             });
         }
     }, [
         gameState,
         myPlayerId,
-        playPlay,
+        muted,
+        playIncome,
+        playForeignAid,
+        playTax,
+        playCoup,
+        playAssassinate,
+        playSteal,
+        playExchange,
+        playInterrogate,
+        playInquire,
         playBlock,
-        playChallenge
+        playChallenge,
+        playLoseInfluence,
+        playGameOver
     ]);
 }

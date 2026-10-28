@@ -5,10 +5,11 @@ import { normalizeVariant, VariantKey } from "@/lib/variants";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
-import { Users, Copy, CheckCheck, ArrowLeft } from "lucide-react";
+import { Users, Copy, CheckCheck, ArrowLeft, Trophy, BarChart3 } from "lucide-react";
 import { GamePlay } from "@/components/game/game-play";
+import { getPlayerColor, getPlayerInitial } from "@/lib/player-colors";
 
 interface CoupGameClientProps {
     roomCode: string;
@@ -35,6 +36,9 @@ export function CoupGameClient({ roomCode, variant }: CoupGameClientProps) {
         hostId,
         isHost,
         playerId,
+        roomStats,
+        disconnectedPlayers,
+        reactions,
         joinGame,
         startGame,
         kickPlayer,
@@ -47,6 +51,7 @@ export function CoupGameClient({ roomCode, variant }: CoupGameClientProps) {
         interrogateSelect,
         interrogateDecision,
         loseInfluence,
+        sendReaction,
         returnToLobby,
     } = usePartyCoup({
         roomCode,
@@ -54,6 +59,18 @@ export function CoupGameClient({ roomCode, variant }: CoupGameClientProps) {
         action: action || undefined,
         onKicked: () => router.push(`${basePath}/join`),
     });
+
+    // Auto-join for reconnecting players
+    // If we receive a gameState without having joined, it means we're reconnecting
+    useEffect(() => {
+        if (gameState && !hasJoined) {
+            // Check if our playerId is in the game
+            const isInGame = gameState.players.some(p => p.id === playerId);
+            if (isInGame) {
+                setHasJoined(true);
+            }
+        }
+    }, [gameState, hasJoined, playerId]);
 
     const handleCopyCode = () => {
         navigator.clipboard.writeText(roomCode.toUpperCase());
@@ -259,36 +276,40 @@ export function CoupGameClient({ roomCode, variant }: CoupGameClientProps) {
                                 )}
 
                                 <div className="space-y-3 min-h-60">
-                                    {players.map((player, index) => (
-                                        <div
-                                            key={player.id}
-                                            className="flex items-center justify-between gap-4 p-4 bg-slate-800/40 hover:bg-slate-800/60 border border-slate-700/50 rounded-xl transition-all group"
-                                        >
-                                            <div className="flex items-center gap-4">
-                                                <div className="flex items-center justify-center w-10 h-10 rounded-full bg-slate-900 text-amber-500 font-bold border border-slate-700 shadow-sm">
-                                                    {index + 1}
+                                    {players.map((player, index) => {
+                                        const color = getPlayerColor(index);
+                                        return (
+                                            <div
+                                                key={player.id}
+                                                className="flex items-center justify-between gap-4 p-4 bg-slate-800/40 hover:bg-slate-800/60 border border-slate-700/50 rounded-xl transition-all group relative overflow-hidden"
+                                            >
+                                                <div className={`absolute inset-y-0 left-0 w-1 ${color.accent}`} />
+                                                <div className="flex items-center gap-4 min-w-0">
+                                                    <div className={`flex items-center justify-center w-10 h-10 rounded-full ${color.bg} ${color.ring} ring-2 text-white font-black border border-slate-900 shadow-sm shrink-0`}>
+                                                        {getPlayerInitial(player.name)}
+                                                    </div>
+                                                    <div className="min-w-0">
+                                                        <span className={`text-xl font-bold truncate ${color.text}`}>{player.name}</span>
+                                                        {player.id === hostId && (
+                                                            <span className="ml-3 text-xs font-bold bg-amber-500/20 text-amber-400 px-2 py-1 rounded-full border border-amber-500/30 uppercase tracking-wider">
+                                                                Host
+                                                            </span>
+                                                        )}
+                                                    </div>
                                                 </div>
-                                                <div>
-                                                    <span className="text-xl font-bold text-slate-200">{player.name}</span>
-                                                    {player.id === hostId && (
-                                                        <span className="ml-3 text-xs font-bold bg-amber-500/20 text-amber-400 px-2 py-1 rounded-full border border-amber-500/30 uppercase tracking-wider">
-                                                            Host
-                                                        </span>
-                                                    )}
-                                                </div>
+                                                {isHost && player.id !== hostId && (
+                                                    <Button
+                                                        variant="ghost"
+                                                        size="sm"
+                                                        onClick={() => kickPlayer(player.id)}
+                                                        className="text-red-400 hover:text-red-300 hover:bg-red-900/20 opacity-100 transition-opacity shrink-0"
+                                                    >
+                                                        Kick
+                                                    </Button>
+                                                )}
                                             </div>
-                                            {isHost && player.id !== hostId && (
-                                                <Button
-                                                    variant="ghost"
-                                                    size="sm"
-                                                    onClick={() => kickPlayer(player.id)}
-                                                    className="text-red-400 hover:text-red-300 hover:bg-red-900/20 opacity-100 transition-opacity"
-                                                >
-                                                    Kick
-                                                </Button>
-                                            )}
-                                        </div>
-                                    ))}
+                                        );
+                                    })}
 
                                     {players.length === 0 && (
                                         <div className="flex flex-col items-center justify-center h-60 text-slate-500 border-2 border-dashed border-slate-800 rounded-xl bg-slate-900/20">
@@ -307,6 +328,53 @@ export function CoupGameClient({ roomCode, variant }: CoupGameClientProps) {
                                     )}
                                 </div>
                             </div>
+
+                            {roomStats && roomStats.totalGamesPlayed > 0 && (
+                                <div className="space-y-4 pt-6 border-t border-slate-800">
+                                    <div className="flex items-center gap-3 px-2">
+                                        <div className="flex items-center gap-2 text-purple-400">
+                                            <BarChart3 className="size-5" />
+                                            <h2 className="text-lg font-bold uppercase tracking-wide">Room Stats</h2>
+                                        </div>
+                                        <span className="text-xs text-slate-500 font-medium">
+                                            {roomStats.totalGamesPlayed} game{roomStats.totalGamesPlayed !== 1 ? 's' : ''} played
+                                        </span>
+                                    </div>
+                                    <div className="space-y-2">
+                                        {Object.values(roomStats.playerStats)
+                                            .sort((a, b) => b.wins - a.wins || b.gamesPlayed - a.gamesPlayed)
+                                            .map((stat, index) => {
+                                                const playerIndex = players.findIndex(player => player.id === stat.playerId);
+                                                const color = getPlayerColor(playerIndex === -1 ? index : playerIndex);
+                                                return (
+                                                    <div
+                                                        key={stat.playerId}
+                                                        className={`flex items-center justify-between p-3 rounded-lg border transition-all ${index === 0 && stat.wins > 0
+                                                            ? "bg-amber-900/20 border-amber-700/50"
+                                                            : "bg-slate-800/30 border-slate-700/30"
+                                                            }`}
+                                                    >
+                                                        <div className="flex items-center gap-3 min-w-0">
+                                                            {index === 0 && stat.wins > 0 && (
+                                                                <Trophy className="size-4 text-amber-400 shrink-0" />
+                                                            )}
+                                                            <span className={`font-semibold truncate ${index === 0 && stat.wins > 0 ? "text-amber-200" : color.text}`}>
+                                                                {stat.playerName}
+                                                            </span>
+                                                        </div>
+                                                        <div className="flex items-center gap-4 text-sm shrink-0">
+                                                            <span className="text-emerald-400 font-bold">{stat.wins}W</span>
+                                                            <span className="text-slate-500">{stat.gamesPlayed}GP</span>
+                                                            <span className="text-slate-400 font-mono text-xs">
+                                                                {stat.gamesPlayed > 0 ? Math.round((stat.wins / stat.gamesPlayed) * 100) : 0}%
+                                                            </span>
+                                                        </div>
+                                                    </div>
+                                                );
+                                            })}
+                                    </div>
+                                </div>
+                            )}
 
                             <div className="space-y-4 pt-6 border-t border-slate-800">
                                 <Button
@@ -347,6 +415,10 @@ export function CoupGameClient({ roomCode, variant }: CoupGameClientProps) {
         <GamePlay
             gameState={gameState}
             myPlayerId={playerId}
+            isHost={isHost}
+            roomStats={roomStats}
+            disconnectedPlayers={disconnectedPlayers}
+            reactions={reactions}
             onAction={performAction}
             onBlock={blockAction}
             onPassBlock={passBlock}
@@ -357,6 +429,8 @@ export function CoupGameClient({ roomCode, variant }: CoupGameClientProps) {
             onInterrogateDecision={interrogateDecision}
             onLoseInfluence={loseInfluence}
             onReturnToLobby={returnToLobby}
+            onKickPlayer={kickPlayer}
+            onReaction={sendReaction}
             error={error}
         />
     );

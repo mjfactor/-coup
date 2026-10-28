@@ -6,7 +6,9 @@ import { Button } from "@/components/ui/button";
 import { Sheet, SheetContent, SheetHeader, SheetTitle, SheetTrigger } from "@/components/ui/sheet";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { GameState, ActionType, CharacterType, Player, GameLogEntry } from "@/lib/game-logic";
-import { Coins, Crown, Skull, Shield, Users, BookOpen, X, History, Swords, AlertTriangle, RefreshCw, Hourglass, Target, Eye } from "lucide-react";
+import { Coins, Crown, Skull, Shield, Users, BookOpen, X, History, Swords, AlertTriangle, RefreshCw, Hourglass, Target, Eye, WifiOff, UserX, Trophy, Volume2, VolumeX, SmilePlus } from "lucide-react";
+import type { PlayerReaction, RoomStats } from "@/lib/usePartyKit";
+import { getPlayerColor, getPlayerInitial } from "@/lib/player-colors";
 import Image from "next/image";
 import { RulesModal } from "./rules-modal";
 import { StartingPlayerRoulette } from "./starting-player-roulette";
@@ -74,11 +76,25 @@ function TargetSelectionModal({
     );
 }
 
+interface DisconnectedPlayerInfo {
+    playerId: string;
+    disconnectedAt: number;
+    gracePeriodMs: number;
+}
+
 interface GameBoardProps {
     gameState: GameState;
     myPlayerId: string;
+    isHost: boolean;
+    roomStats: RoomStats | null;
+    disconnectedPlayers: Map<string, DisconnectedPlayerInfo>;
+    soundMuted: boolean;
+    reactions: PlayerReaction[];
     onAction: (action: ActionType, targetId?: string) => void;
     onReturnToLobby: () => void;
+    onKickPlayer: (playerId: string) => void;
+    onToggleSound: () => void;
+    onReaction: (emoji: string) => void;
 }
 
 const formatLogMessage = (message: string, players: { name: string }[], characters: CharacterType[]) => {
@@ -90,10 +106,6 @@ const formatLogMessage = (message: string, players: { name: string }[], characte
         Contessa: "text-orange-400 font-bold",
         Inquisitor: "text-emerald-400 font-bold",
     };
-
-    const playerColors = [
-        "text-red-400", "text-blue-400", "text-green-400", "text-yellow-400", "text-pink-400", "text-cyan-400"
-    ];
 
     const escapeRegExp = (string: string) => string.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 
@@ -117,49 +129,174 @@ const formatLogMessage = (message: string, players: { name: string }[], characte
         }
         const playerIndex = players.findIndex(p => p.name === part);
         if (playerIndex !== -1) {
-            const color = playerColors[playerIndex % playerColors.length];
+            const color = getPlayerColor(playerIndex).text;
             return <span key={index} className={`${color} font-bold`}>{part}</span>;
         }
         return part;
     });
 };
 
+function PlayerAvatar({
+    name,
+    playerIndex,
+    size = "md",
+    stateIcon,
+}: {
+    name: string;
+    playerIndex: number;
+    size?: "sm" | "md" | "lg";
+    stateIcon?: "you" | "turn" | "target";
+}) {
+    const color = getPlayerColor(playerIndex);
+    const sizeClass = size === "lg" ? "size-10" : size === "sm" ? "size-8" : "size-9";
+    const Icon = stateIcon === "you" ? Shield : stateIcon === "turn" ? Crown : stateIcon === "target" ? Target : null;
+    const iconClass = stateIcon === "target"
+        ? "bg-red-500 text-white"
+        : stateIcon === "turn"
+            ? "bg-blue-500 text-white"
+            : "bg-purple-500 text-white";
+
+    return (
+        <div className={`relative ${sizeClass} shrink-0 rounded-full ${color.bg} ${color.ring} ring-2 flex items-center justify-center text-white font-black shadow-lg`}>
+            <span>{getPlayerInitial(name)}</span>
+            {Icon && (
+                <span className={`absolute -bottom-1 -right-1 size-4 rounded-full ${iconClass} border border-slate-950 flex items-center justify-center`}>
+                    <Icon className="size-2.5" />
+                </span>
+            )}
+        </div>
+    );
+}
+
+const REACTION_EMOJIS = ["👍", "👏", "😂", "😮", "🤔", "💀", "🔥"];
+
+function CoinBadge({ coins }: { coins: number }) {
+    const [isChanging, setIsChanging] = useState(false);
+    const [previousCoins, setPreviousCoins] = useState(coins);
+
+    useEffect(() => {
+        if (coins === previousCoins) return;
+        setPreviousCoins(coins);
+        setIsChanging(true);
+        const timer = setTimeout(() => setIsChanging(false), 500);
+        return () => clearTimeout(timer);
+    }, [coins, previousCoins]);
+
+    return (
+        <div className={`flex items-center gap-2 bg-black/20 px-3 py-1 rounded-full border border-white/5 transition-all duration-300 ${isChanging ? "scale-110 shadow-lg shadow-yellow-500/30" : ""}`}>
+            <Coins className="size-4 text-yellow-400" />
+            <span className="text-xl font-bold text-yellow-400">{coins}</span>
+        </div>
+    );
+}
+
 function VictoryCountdown({
     winnerName,
+    roomStats,
+    gameState,
     onReturnToLobby,
 }: {
     winnerName: string;
+    roomStats: RoomStats | null;
+    gameState: GameState;
     onReturnToLobby: () => void;
 }) {
-    const [countdown, setCountdown] = useState(3);
+    const [showStats, setShowStats] = useState(false);
 
     useEffect(() => {
-        const timer = setInterval(() => {
-            setCountdown((prev) => {
-                if (prev <= 1) {
-                    clearInterval(timer);
-                    onReturnToLobby();
-                    return 0;
-                }
-                return prev - 1;
-            });
-        }, 1000);
-        return () => clearInterval(timer);
-    }, [onReturnToLobby]);
+        const statsTimer = setTimeout(() => setShowStats(true), 1500);
+        return () => clearTimeout(statsTimer);
+    }, []);
+
+    const sortedStats = roomStats
+        ? Object.values(roomStats.playerStats).sort((a, b) => b.wins - a.wins || b.gamesPlayed - a.gamesPlayed)
+        : [];
 
     return (
-        <div className="fixed inset-0 bg-black/70 backdrop-blur-sm flex items-center justify-center z-50">
-            <div className="bg-linear-to-br from-purple-900 to-pink-900 rounded-2xl p-8 border-4 border-yellow-500 shadow-2xl text-center animate-in zoom-in duration-500 max-w-md w-full mx-4">
-                <div className="text-6xl mb-4">🎉</div>
-                <h2 className="text-4xl font-bold mb-2 text-yellow-400">Victory!</h2>
-                <p className="text-2xl text-white mb-8">
-                    {winnerName} wins!
+        <div className="fixed inset-0 bg-black/80 backdrop-blur-md flex items-center justify-center z-50">
+            <div className="bg-linear-to-br from-purple-900 to-pink-900 rounded-2xl p-8 border-4 border-yellow-500 shadow-2xl text-center animate-in zoom-in duration-500 max-w-lg w-full mx-4">
+                <div className="text-7xl mb-3">👑</div>
+                <h2 className="text-5xl font-black mb-2 text-yellow-400 drop-shadow-lg">Victory!</h2>
+                <p className="text-3xl text-white mb-2 font-bold">
+                    {winnerName}
                 </p>
-                <div className="flex flex-col gap-3">
-                    <p className="text-slate-300 animate-pulse">
-                        Returning to lobby in {countdown}...
-                    </p>
+                <p className="text-lg text-purple-200 mb-6">wins the game!</p>
+
+                {/* Final standings */}
+                <div className="bg-black/30 rounded-xl p-4 mb-4 text-left">
+                    <h3 className="text-sm font-bold text-purple-300 uppercase tracking-wider mb-3">Final Standings</h3>
+                    <div className="space-y-2">
+                        {gameState.players.slice()
+                            .sort((a, b) => {
+                                if (a.id === gameState.winner) return -1;
+                                if (b.id === gameState.winner) return 1;
+                                const aAlive = a.cards.filter(c => !c.revealed).length;
+                                const bAlive = b.cards.filter(c => !c.revealed).length;
+                                return bAlive - aAlive;
+                            })
+                            .map((player) => {
+                                const playerIndex = gameState.players.findIndex(p => p.id === player.id);
+                                const color = getPlayerColor(playerIndex);
+                                return (
+                                <div key={player.id} className={`flex items-center justify-between py-1.5 px-3 rounded-lg ${
+                                    player.id === gameState.winner ? "bg-yellow-500/20" : ""
+                                }`}>
+                                    <div className="flex items-center gap-2">
+                                        {player.id === gameState.winner && <Trophy className="size-4 text-yellow-400" />}
+                                        <span className={`font-semibold ${player.id === gameState.winner ? "text-yellow-300" : color.text}`}>
+                                            {player.name}
+                                        </span>
+                                    </div>
+                                    <div className="flex items-center gap-2">
+                                        <span className="text-xs text-slate-400">
+                                            {player.cards.filter(c => !c.revealed).length} card{player.cards.filter(c => !c.revealed).length !== 1 ? 's' : ''} left
+                                        </span>
+                                        <span className="text-xs text-amber-400 font-mono">{player.coins}¢</span>
+                                    </div>
+                                </div>
+                            )})}
+                    </div>
                 </div>
+
+                {/* Room stats leaderboard */}
+                {showStats && sortedStats.length > 0 && roomStats && roomStats.totalGamesPlayed > 1 && (
+                    <div className="bg-black/30 rounded-xl p-4 mb-6 text-left animate-in fade-in slide-in-from-bottom-2 duration-300">
+                        <h3 className="text-sm font-bold text-emerald-300 uppercase tracking-wider mb-3">
+                            Leaderboard ({roomStats.totalGamesPlayed} games)
+                        </h3>
+                        <div className="space-y-1.5">
+                            {sortedStats.map((stat, index) => {
+                                const playerIndex = gameState.players.findIndex(player => player.id === stat.playerId);
+                                const color = getPlayerColor(playerIndex === -1 ? index : playerIndex);
+                                return (
+                                <div key={stat.playerId} className="flex items-center justify-between py-1 px-2">
+                                    <div className="flex items-center gap-2">
+                                        <span className={`text-xs font-bold w-5 ${index === 0 ? "text-yellow-400" : "text-slate-500"}`}>
+                                            #{index + 1}
+                                        </span>
+                                        <span className={`font-medium ${index === 0 ? "text-yellow-300" : color.text}`}>
+                                            {stat.playerName}
+                                        </span>
+                                    </div>
+                                    <div className="flex items-center gap-3 text-xs">
+                                        <span className="text-emerald-400 font-bold">{stat.wins}W</span>
+                                        <span className="text-slate-500">{stat.gamesPlayed - stat.wins}L</span>
+                                        <span className="text-slate-400 font-mono">
+                                            {Math.round((stat.wins / stat.gamesPlayed) * 100)}%
+                                        </span>
+                                    </div>
+                                </div>
+                            )})}
+                        </div>
+                    </div>
+                )}
+
+                <Button
+                    onClick={onReturnToLobby}
+                    className="w-full h-12 text-lg font-bold bg-yellow-600 hover:bg-yellow-500 text-white"
+                >
+                    Return to Lobby
+                </Button>
             </div>
         </div>
     );
@@ -278,10 +415,25 @@ function DeckView({ count }: { count: number }) {
     )
 }
 
-export function GameBoard({ gameState, myPlayerId, onAction, onReturnToLobby }: GameBoardProps) {
+export function GameBoard({
+    gameState,
+    myPlayerId,
+    isHost,
+    roomStats,
+    disconnectedPlayers,
+    soundMuted,
+    reactions,
+    onAction,
+    onReturnToLobby,
+    onKickPlayer,
+    onToggleSound,
+    onReaction,
+}: GameBoardProps) {
     const [showRules, setShowRules] = useState(false);
     const [selectedTargetAction, setSelectedTargetAction] = useState<ActionType | null>(null);
     const [hasSeenRoulette, setHasSeenRoulette] = useState(false);
+    const [showReactions, setShowReactions] = useState(false);
+    const [reactionCooldown, setReactionCooldown] = useState(false);
     const variantConfig = getVariantConfig(gameState.variant);
 
     const currentPlayer = gameState.players[gameState.currentPlayerIndex];
@@ -299,6 +451,14 @@ export function GameBoard({ gameState, myPlayerId, onAction, onReturnToLobby }: 
             onAction(selectedTargetAction, targetId);
             setSelectedTargetAction(null);
         }
+    };
+
+    const handleReaction = (emoji: string) => {
+        if (reactionCooldown) return;
+        onReaction(emoji);
+        setReactionCooldown(true);
+        setShowReactions(false);
+        setTimeout(() => setReactionCooldown(false), 1000);
     };
 
     const groupedLogs = gameState.log.reduce((acc, entry) => {
@@ -356,6 +516,15 @@ export function GameBoard({ gameState, myPlayerId, onAction, onReturnToLobby }: 
                             >
                                 <BookOpen className="size-5" />
                             </Button>
+                            <Button
+                                variant="ghost"
+                                size="icon"
+                                onClick={onToggleSound}
+                                className="text-slate-300 hover:text-white hover:bg-slate-700/70"
+                                title={soundMuted ? "Unmute sounds" : "Mute sounds"}
+                            >
+                                {soundMuted ? <VolumeX className="size-5" /> : <Volume2 className="size-5" />}
+                            </Button>
                         </div>
 
                         {/* Deck View - Centered on larger screens, hidden on very small if needed or adjusted */}
@@ -379,10 +548,13 @@ export function GameBoard({ gameState, myPlayerId, onAction, onReturnToLobby }: 
 
                     {/* Players Grid */}
                     <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
-                        {gameState.players.map((player) => {
+                        {gameState.players.map((player, playerIndex) => {
                             const isMe = player.id === myPlayerId;
                             const isCurrentTurn = player.id === currentPlayer.id;
                             const isTargeted = gameState.pendingAction?.targetId === player.id;
+                            const color = getPlayerColor(playerIndex);
+                            const playerReactions = reactions.filter(reaction => reaction.playerId === player.id);
+                            const avatarState = isTargeted ? "target" : isMe ? "you" : isCurrentTurn ? "turn" : undefined;
 
                             const isWaitingForAction = (() => {
                                 if (!player.isAlive) return false;
@@ -412,17 +584,30 @@ export function GameBoard({ gameState, myPlayerId, onAction, onReturnToLobby }: 
                             return (
                                 <div
                                     key={player.id}
-                                    className={`rounded-lg p-4 transition-all relative overflow-hidden ${isTargeted
+                                    className={`rounded-lg p-4 transition-all duration-500 relative overflow-hidden ${isTargeted
                                         ? "bg-red-900/30 border-2 border-red-500 shadow-[0_0_15px_rgba(239,68,68,0.5)] animate-pulse"
                                         : isMe
                                             ? "bg-linear-to-br from-purple-900/30 to-pink-900/30 border-2 border-purple-500/50 shadow-lg shadow-purple-500/20"
                                             : isCurrentTurn
-                                                ? "bg-linear-to-br from-blue-900/30 to-cyan-900/30 border-2 border-blue-500/50 shadow-lg shadow-blue-500/20"
+                                                ? "bg-linear-to-br from-blue-900/30 to-cyan-900/30 border-2 border-blue-500/50 shadow-lg shadow-blue-500/20 animate-pulse"
                                                 : player.isAlive
                                                     ? "bg-slate-800/50 border border-slate-700"
-                                                    : "bg-slate-900/50 border border-slate-800 opacity-50"
+                                                    : "bg-slate-900/50 border border-slate-800 opacity-50 scale-[0.98]"
                                         }`}
                                 >
+                                    <div className={`absolute inset-y-0 left-0 w-1 ${color.accent}`} />
+                                    {playerReactions.map((reaction, reactionIndex) => (
+                                        <div
+                                            key={reaction.id}
+                                            className="absolute left-1/2 z-30 reaction-float pointer-events-none"
+                                            style={{ top: `${12 + reactionIndex * 8}px` }}
+                                        >
+                                            <div className="rounded-full bg-slate-950/90 border border-slate-700 px-3 py-1 shadow-xl flex items-center gap-2">
+                                                <span className="text-2xl leading-none">{reaction.emoji}</span>
+                                                <span className="text-xs text-slate-300 font-semibold max-w-24 truncate">{reaction.playerName}</span>
+                                            </div>
+                                        </div>
+                                    ))}
                                     {isTargeted && (
                                         <div className="absolute top-0 right-0 bg-red-500 text-white text-xs font-bold px-2 py-1 rounded-bl-lg z-20 flex items-center gap-1 animate-bounce">
                                             <Target className="size-3" />
@@ -431,26 +616,10 @@ export function GameBoard({ gameState, myPlayerId, onAction, onReturnToLobby }: 
                                     )}
                                     <div className="flex items-center justify-between mb-4">
                                         <div className="flex items-center gap-3 min-w-0">
-                                            {isTargeted ? (
-                                                <div className="bg-red-500/20 p-2 rounded-full animate-pulse shrink-0">
-                                                    <Target className="size-5 text-red-400" />
-                                                </div>
-                                            ) : isMe ? (
-                                                <div className="bg-purple-500/20 p-2 rounded-full shrink-0">
-                                                    <Shield className="size-5 text-purple-400" />
-                                                </div>
-                                            ) : isCurrentTurn ? (
-                                                <div className="bg-blue-500/20 p-2 rounded-full shrink-0">
-                                                    <Crown className="size-5 text-blue-400" />
-                                                </div>
-                                            ) : (
-                                                <div className="bg-slate-700/50 p-2 rounded-full shrink-0">
-                                                    <Users className="size-5 text-slate-400" />
-                                                </div>
-                                            )}
+                                            <PlayerAvatar name={player.name} playerIndex={playerIndex} stateIcon={avatarState} />
                                             <div className="min-w-0">
                                                 <h3 className="text-lg font-bold flex items-center gap-2">
-                                                    <span className="truncate">{player.name}</span>
+                                                    <span className={`truncate ${color.text}`}>{player.name}</span>
                                                     {isMe && <span className="text-xs bg-purple-500/20 text-purple-300 px-2 py-0.5 rounded-full border border-purple-500/30 shrink-0">You</span>}
                                                     {isWaitingForAction && (
                                                         <span className="flex items-center gap-1 text-xs bg-yellow-500/20 text-yellow-300 px-2 py-0.5 rounded-full border border-yellow-500/30 animate-pulse shrink-0">
@@ -470,18 +639,30 @@ export function GameBoard({ gameState, myPlayerId, onAction, onReturnToLobby }: 
                                                 )}
                                             </div>
                                         </div>
-                                        <div className="flex items-center gap-2 bg-black/20 px-3 py-1 rounded-full border border-white/5">
-                                            <Coins className="size-4 text-yellow-400" />
-                                            <span className="text-xl font-bold text-yellow-400">{player.coins}</span>
+                                        <div className="flex items-center gap-2">
+                                            {/* Kick button for host */}
+                                            {isHost && !isMe && player.isAlive && (
+                                                <Button
+                                                    variant="ghost"
+                                                    size="icon"
+                                                    onClick={() => onKickPlayer(player.id)}
+                                                    className="size-8 text-red-400 hover:text-red-300 hover:bg-red-900/30"
+                                                    title={`Kick ${player.name}`}
+                                                >
+                                                    <UserX className="size-4" />
+                                                </Button>
+                                            )}
+                                            <CoinBadge coins={player.coins} />
                                         </div>
-                                    </div>                                    <div className="flex gap-3 justify-center">
+                                    </div>
+                                    <div className="flex gap-3 justify-center">
                                         {player.cards.map((card) => (
                                             <div
                                                 key={card.id}
-                                                className={`w-28 h-40 rounded-lg transition-all relative group overflow-hidden shadow-xl ${card.revealed
+                                                className={`w-28 h-40 rounded-lg transition-all duration-300 relative group overflow-hidden shadow-xl ${card.revealed
                                                     ? "opacity-60 grayscale"
                                                     : isMe
-                                                        ? "hover:scale-105 hover:z-10 hover:shadow-purple-500/50 ring-2 ring-purple-500/50"
+                                                        ? `hover:scale-105 hover:z-10 hover:shadow-purple-500/50 ring-2 ${color.ring}`
                                                         : "ring-1 ring-slate-600"
                                                     }`}
                                                 title={isMe && !card.revealed ? card.character : "Hidden Card"}
@@ -688,6 +869,8 @@ export function GameBoard({ gameState, myPlayerId, onAction, onReturnToLobby }: 
                     {gameState.winner && (
                         <VictoryCountdown
                             winnerName={gameState.players.find(p => p.id === gameState.winner)?.name || "Unknown Player"}
+                            roomStats={roomStats}
+                            gameState={gameState}
                             onReturnToLobby={onReturnToLobby}
                         />
                     )}
@@ -710,6 +893,52 @@ export function GameBoard({ gameState, myPlayerId, onAction, onReturnToLobby }: 
                 <ScrollArea className="flex-1 px-6 h-full">
                     <GameLogList groupedLogs={groupedLogs} players={gameState.players} characters={variantConfig.characters} />
                 </ScrollArea>
+            </div>
+
+            {/* Emoji Reactions */}
+            <div className="fixed bottom-4 left-4 z-50">
+                <div className="hidden lg:flex items-center gap-2 rounded-full bg-slate-900/90 border border-slate-700 p-2 shadow-xl backdrop-blur-sm">
+                    {REACTION_EMOJIS.map(emoji => (
+                        <Button
+                            key={emoji}
+                            variant="ghost"
+                            size="icon"
+                            onClick={() => handleReaction(emoji)}
+                            disabled={reactionCooldown}
+                            className="size-10 rounded-full text-xl hover:bg-slate-700 disabled:opacity-50"
+                        >
+                            {emoji}
+                        </Button>
+                    ))}
+                </div>
+
+                <div className="lg:hidden flex items-center gap-2">
+                    {showReactions && (
+                        <div className="flex items-center gap-1 rounded-full bg-slate-900/95 border border-slate-700 p-2 shadow-xl backdrop-blur-sm animate-in fade-in slide-in-from-left-2">
+                            {REACTION_EMOJIS.map(emoji => (
+                                <Button
+                                    key={emoji}
+                                    variant="ghost"
+                                    size="icon"
+                                    onClick={() => handleReaction(emoji)}
+                                    disabled={reactionCooldown}
+                                    className="size-9 rounded-full text-lg hover:bg-slate-700 disabled:opacity-50"
+                                >
+                                    {emoji}
+                                </Button>
+                            ))}
+                        </div>
+                    )}
+                    <Button
+                        variant="outline"
+                        size="icon"
+                        onClick={() => setShowReactions(prev => !prev)}
+                        disabled={reactionCooldown}
+                        className="rounded-full h-14 w-14 shadow-xl bg-slate-800 border-amber-500 text-amber-400 hover:bg-slate-700 hover:text-amber-300 disabled:opacity-50"
+                    >
+                        <SmilePlus className="size-6" />
+                    </Button>
+                </div>
             </div>
 
             {/* Mobile Toggle (Sheet) */}
